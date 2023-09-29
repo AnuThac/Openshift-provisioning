@@ -1,0 +1,68 @@
+---
+  - name: "Installing OS cluster"
+    hosts: localhost
+    connection: local
+    vars_files:
+    - /root/testing/vars
+
+    tasks:
+    - name: "Installing CLIs"
+      shell: |
+        sudo apt install unzip
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip awscliv2.zip
+        sudo ./aws/install
+        wget -q https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/openshift-client-linux.tar.gz
+        tar zxvf openshift-client-linux.tar.gz
+        chmod 777 /usr/local/bin/oc
+        chmod 777 /usr/local/bin/kubectl
+        sudo cp oc /usr/local/sbin/
+        sudo cp kubectl /usr/local/sbin/
+        rm -rf awscliv2.zip
+        rm -rf openshift-client-linux.tar.gz
+
+    - name: "Updating Install config file"
+      template:
+        src: /root/testing/install-config.j2
+        dest: /root/testing/install-config.yaml
+
+    - name: "Downloading Openshift Installer"
+      shell: |
+        wget https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/stable/openshift-install-linux.tar.gz
+        tar -xvzf openshift-install-linux.tar.gz
+        sudo cp openshift-install /usr/local/bin/
+        rm -rf openshift-install-linux.tar.gz*
+
+    - name: " adding tags to iam users "
+      shell: |
+        pattern="{{ cluster_name }}-"
+        target_count=6
+        while [ "$(echo "$RESOURCE_IDS" | wc -w)" -lt "$target_count" ]; do
+            echo "Waiting for $target_count items..."
+            iam_users=$(aws iam list-users |grep -i UserName|sed -e 's/.*: \"//' -e 's/\",//')
+            RESOURCE_IDS=$(echo "$iam_users" | grep -E "$pattern")
+            sleep 5
+        done
+        for RESOURCE_ID in $RESOURCE_IDS
+        do
+           aws iam tag-user --user-name $RESOURCE_ID --tags Key=Type,Value=AppID
+           echo "Added tag 'Type=AppID' to resource $RESOURCE_ID"
+        done
+      async: 900
+      poll: 0
+      register: "iam"
+
+    - debug: var=iam.stdout.lines
+
+    - name: "Installing Opeshift cluster"
+      shell: |
+        openshift-install create cluster --dir /root/testing  --log-level=info #dir with install-config.yaml file
+
+    - name: "Connecting to cluster"
+      shell: |
+        export KUBECONFIG=/root/testing/auth/kubeconfig
+        oc get nodes
+        cat /root/testing/auth/kubeconfig
+      register: "kubefile"
+
+    - debug: var=kubefile.stdout_lines
