@@ -1,0 +1,5 @@
+region : '**'
+base_domain : '****'
+cluster_name : '**'
+pull_secret : '************************'
+ssh_key : '************'
