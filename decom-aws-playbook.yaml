@@ -1,0 +1,28 @@
+  - name: "Installing OS cluster"
+    hosts: localhost
+    connection: local
+    vars_files:
+    - /home/ubuntu/testing/decom/vars
+
+    tasks:
+    - name: Copying files from S3
+      shell: |
+        aws s3 cp 's3://aws-openshift/{{ cluster_name }}/' '{{ cluster_name }}' --recursive
+        #      aws_s3:
+        #        bucket: aws-openshift
+        #        object: "{{ cluster_name }}/"
+        #        dest: "./{{ cluster_name }}"
+        #        mode: get
+
+    - name: Deleting Opeshift cluster
+      shell: |
+        openshift-install destroy cluster --dir '{{ cluster_name }}' --log-level info
+      register: "output"
+    - debug: var=output
+
+
+    - name: Deleting s3 object
+      shell: |
+        aws s3 rm 's3://aws-openshift/{{ cluster_name }}' --recursive
+      register: "dele"
+    - debug: var=dele
