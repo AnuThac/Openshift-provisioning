@@ -3,15 +3,22 @@
     hosts: localhost
     connection: local
     vars_files:
-    - /root/testing/vars
+    - /home/ubuntu/testing/vars
 
     tasks:
-    - name: "Installing CLIs"
+    - name: Cloning repo for install-config template
+      ansible.builtin.git:
+        repo: https://github.com/AnuThac/Openshift-provisioning.git
+        dest: '{{ cluster_name }}'
+        version: main
+
+    - name: Installing  CLIs- AWS, oc, kubectl
+      become: true
       shell: |
-        sudo apt install unzip
+        apt install unzip
         curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
         unzip awscliv2.zip
-        sudo ./aws/install
+        ./aws/install
         wget -q https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/openshift-client-linux.tar.gz
         tar zxvf openshift-client-linux.tar.gz
         chmod 777 /usr/local/bin/oc
@@ -20,20 +27,25 @@
         sudo cp kubectl /usr/local/sbin/
         rm -rf awscliv2.zip
         rm -rf openshift-client-linux.tar.gz
+      register: "cli"
+    - debug: var=cli.stdout_lines
 
-    - name: "Updating Install config file"
+    - name: Updating Install config file
       template:
-        src: /root/testing/install-config.j2
-        dest: /root/testing/install-config.yaml
+        src: '{{ cluster_name }}/aws/install-config.j2'
+        dest: '{{ cluster_name }}/aws/install-config.yaml'
 
-    - name: "Downloading Openshift Installer"
+    - name: Downloading Openshift Installer
+      become: true
       shell: |
         wget https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/stable/openshift-install-linux.tar.gz
         tar -xvzf openshift-install-linux.tar.gz
-        sudo cp openshift-install /usr/local/bin/
+        cp openshift-install /usr/local/bin/
         rm -rf openshift-install-linux.tar.gz*
+      register: "installer"
+    - debug: var=installer.stdout.lines
 
-    - name: " adding tags to iam users "
+    - name: "Adding tags to IAM users"
       shell: |
         pattern="{{ cluster_name }}-"
         target_count=6
@@ -50,19 +62,62 @@
         done
       async: 900
       poll: 0
-      register: "iam"
-
-    - debug: var=iam.stdout.lines
 
     - name: "Installing Opeshift cluster"
+      ignore_errors: true 
       shell: |
-        openshift-install create cluster --dir /root/testing  --log-level=info #dir with install-config.yaml file
+        openshift-install create cluster --dir '{{ cluster_name }}/aws'  --log-level=info
+      register: "inst"
+    - debug: var=inst
 
-    - name: "Connecting to cluster"
+    - name: Creating S3 bucket to store TF state and metadata files
       shell: |
-        export KUBECONFIG=/root/testing/auth/kubeconfig
+        aws s3api head-bucket --bucket aws-openshift --region {{ region }} 2>/dev/null || aws s3api create-bucket --bucket aws-openshift --region {{ region }}  --create-bucket-configuration LocationConstraint={{ region }}
+      register: "bucket"
+    - debug: var=bucket.stdout_lines
+
+    - name: Copying files to S3
+      shell: |
+        aws s3api put-object --bucket aws-openshift --key "{{ cluster_name }}"/
+        aws s3 sync '{{ cluster_name }}'/aws/ 's3://aws-openshift/{{ cluster_name }}/'
+      register: "s3"
+    - debug: var=s3.stdout_lines
+
+    - name: Connecting to cluster
+      shell: |
+        export KUBECONFIG='{{ cluster_name }}/aws/auth/kubeconfig'
         oc get nodes
-        cat /root/testing/auth/kubeconfig
       register: "kubefile"
-
     - debug: var=kubefile.stdout_lines
+
+    - name: "labelling master nodes"
+      block:
+        - name: "get master nodes"
+          shell: |
+            export KUBECONFIG='{{ cluster_name }}/aws/auth/kubeconfig'
+            oc get nodes -l node-role.kubernetes.io/control-plane -o custom-columns=NAME:.metadata.name --no-headers=true
+          register: "master_nodelist"
+
+        - name: "label master nodes"
+          shell: |
+            export KUBECONFIG='{{ cluster_name }}/aws/auth/kubeconfig'
+            oc label node {{ item }} {{ master_tags }}
+          with_items:
+            - "{{ master_nodelist.stdout_lines }}"
+      when: lookup('vars', 'master_tags', default="") != ""
+
+    - name: "labelling worker nodes"
+      block:
+        - name: "get worker nodes"
+          shell: |
+            export KUBECONFIG='{{ cluster_name }}/aws/auth/kubeconfig'
+            oc get nodes -l node-role.kubernetes.io/worker= -o custom-columns=NAME:.metadata.name --no-headers=true
+          register: "worker_nodelist"
+
+        - name: "label worker nodes"
+          shell: |
+            export KUBECONFIG='{{ cluster_name }}/aws/auth/kubeconfig'
+            oc label node {{ item }} {{ worker_tags }}
+          with_items:
+            - "{{ worker_nodelist.stdout_lines }}"
+      when: lookup('vars', 'worker_tags', default="") != ""
